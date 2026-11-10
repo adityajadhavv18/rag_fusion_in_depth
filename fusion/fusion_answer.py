@@ -10,7 +10,7 @@ covered the passage side ("a partnership is the figure the text gives") but not 
 
 Run from rag_fusion_in_depth/ (Qdrant running, OpenAI key sourced):
     uv run fusion/fusion_answer.py f5a f6a            # tune split + judge
-    uv run fusion/fusion_answer.py r0 r4j f5a --test   # the final held-out run
+    uv run fusion/fusion_answer.py f1a2 r4j2 f6a --test   # the final held-out run (r0, r4j: Contextual #2 saved)
 """
 
 from pathlib import Path
@@ -28,9 +28,12 @@ PROMPTS = {"original": answer.PROMPT,
            "v2": answer.PROMPT.replace(PARTNERSHIP, """- A partnership or stand ("added", "put on", "shared") is the figure the text gives for it. A question asking
   how many two batters added, added together, put on or shared asks for that partnership figure. Never add up the
   two batters' own scores: they include runs made with other partners.""")}
-PROMPT_OF = {"f6a": "v2"}  # rung -> answer prompt; every other rung keeps Contextual #2's
+PROMPT_OF = {"f6a": "v2", "f1a2": "v2", "r4j2": "v2"}  # rung -> answer prompt; every other rung keeps Contextual #2's
 
 answer.RUNGS["f6a"] = ("f5a, answer prompt v2 (partnership questions)", answer.RUNGS["f5a"][1])
+# the final test run compares searches under the same prompt: the published RAG Fusion and Contextual #2's best
+answer.RUNGS["f1a2"] = ("f1a (RAG Fusion as published), answer prompt v2", answer.RUNGS["f1a"][1])
+answer.RUNGS["r4j2"] = ("r4j (Contextual #2's best), answer prompt v2", answer.RUNGS["r4j"][1])
 _make_pipeline = answer.make_pipeline
 
 
