@@ -14,12 +14,15 @@ import contextual  # noqa: F401  (puts Contextual #2's modules on the path)
 import ladder as ctx
 
 import rewrite
-from rag_fusion import FUSION, fusion_search
+from rag_fusion import FUSION, NOTE, fusion_search
+from retrieve import dense_search
 
 RESULTS = Path(__file__).resolve().parent / "results" / "ladder_tune.json"
 RUNGS = ctx.RUNGS  # r0 ... r4j from Contextual #2, plus the fusion rungs
 for _key, (_label, _opts) in FUSION.items():
     RUNGS[_key] = (_label, lambda q, k, o=_opts: fusion_search(q, k, **o))
+# Phase 4 baseline: labels without rewrites (one dense search with the question on the note index)
+RUNGS["f4q"] = ("dense with the question only, note index (no rewrites)", lambda q, k: dense_search(q, k, NOTE))
 
 
 def main():

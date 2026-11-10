@@ -1,7 +1,7 @@
 """Look inside the vote: for each tune question, where did each list put the answer, and what did fusion do with it?
 
 Per question (one rung):
-  question   rank of the first answer chunk when searching with the question alone (= r0)
+  question   rank of the first answer chunk when dense-searching the rung's index with the question alone
   rw1..rwN   its rank in each rewrite's list (top 20; - = not found)
   fused      its rank after RRF
   overlap    mean Jaccard of the rewrite lists' top-20 sets (1.0 = every rewrite found the same chunks)
@@ -23,7 +23,8 @@ import ladder as ctx
 from eval_harness import load_golden
 from retrieve import dense_search
 
-from rag_fusion import CANDIDATES, FUSION, fuse, fusion_lists, split
+from rag_fusion import CANDIDATES, FUSION, fuse, fusion_lists, is_question, split
+from retrieve import PLAIN
 
 INF = 10**6
 
@@ -45,9 +46,9 @@ def analyse(rung: str) -> list[dict]:
         parts = ctx.fragments(g)
         lists = fusion_lists(g.question, **list_opts)
         sets = {name: {h.chunk_id for h in hits} for name, hits in lists.items()}
-        rw_sets = [s for name, s in sets.items() if name != "question"]
+        rw_sets = [s for name, s in sets.items() if name.startswith("rw")]  # the dense rewrite lists
         rows.append({
-            "id": g.id, "own": rank_in(parts, dense_search(g.question, CANDIDATES)),
+            "id": g.id, "own": rank_in(parts, dense_search(g.question, CANDIDATES, list_opts.get("collection", PLAIN))),
             "fused": rank_in(parts, fuse(lists, **fuse_opts)),
             "ranks": {name: rank_in(parts, hits) for name, hits in lists.items()},
             "overlap": statistics.mean(len(a & b) / len(a | b) for a, b in combinations(rw_sets, 2))
@@ -59,7 +60,7 @@ def analyse(rung: str) -> list[dict]:
 
 
 def verdicts(rows) -> dict:
-    rw_found = lambda r: any(v for n, v in r["ranks"].items() if n != "question")
+    rw_found = lambda r: any(v for n, v in r["ranks"].items() if not is_question(n))
     return {"helped": [r["id"] for r in rows if (r["fused"] or INF) < (r["own"] or INF)],
             "hurt": [r["id"] for r in rows if (r["fused"] or INF) > (r["own"] or INF)],
             "in_pool": [r["id"] for r in rows if r["own"] or rw_found(r)],

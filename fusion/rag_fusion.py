@@ -19,20 +19,38 @@ All lists here are dense searches with the same model, so their cosine scores sh
 across retrievers (BM25 scores vs cosines) they would not be, which is why RRF uses ranks only.
 """
 
-import contextual  # noqa: F401
 from collections import defaultdict
 
-from retrieve import PLAIN, Hit, _dense, dense_search, rrf_fuse, timed
+import contextual  # noqa: F401
+from ingest import BM25, SPLADE, collection as index
+from retrieve import PLAIN, Hit, _dense, dense_search, rrf_fuse, sparse_search, timed
 
 from rewrite import PASSAGES, rewrites
 
 CANDIDATES = 20  # how deep each list goes into the vote, as in Contextual #2's ladder
 PAPER_K = 60  # RRF k in the original repo (Cormack et al.'s default)
+NOTE = index("header_match_note")  # Contextual #2's best index: title › headings + match box + LLM note + chunk
+
+
+def is_question(name: str) -> bool:
+    """Lists searched with the user's own question: "question" (dense), "bm25_question", "splade_question"."""
+    return name.endswith("question")
 
 
 def fusion_lists(q: str, n: int = 4, keep_original: bool = False, collection: str = PLAIN, style: str = "original",
-                 temperature: float = 0.0, sample: int = 0) -> dict[str, list[Hit]]:
+                 temperature: float = 0.0, sample: int = 0, sparse: str = "") -> dict[str, list[Hit]]:
+    """Dense lists: rw1..rwN (+ "question"). sparse adds BM25 and SPLADE lists (Phase 4):
+    "question" = searched with the question only (as in Contextual #2), "all" = with every rewrite too."""
     queries = rewrites(q, n, style, temperature, sample)
+    lists = _dense_lists(q, queries, keep_original, collection, style)
+    if sparse:
+        texts = {"question": q} | ({f"rw{i}": x for i, x in enumerate(queries, start=1)} if sparse == "all" else {})
+        for using in (BM25, SPLADE):
+            lists |= {f"{using}_{name}": sparse_search(t, CANDIDATES, using, collection) for name, t in texts.items()}
+    return lists
+
+
+def _dense_lists(q, queries, keep_original, collection, style) -> dict[str, list[Hit]]:
     if style in PASSAGES:  # fake passages are embedded as documents, like Contextual #2's HyDE
         with timed("hyde_embed"):
             vectors = [v.tolist() for v in _dense().passage_embed(queries)]
@@ -50,7 +68,7 @@ def fuse(lists: dict[str, list[Hit]], method: str = "rrf", rrf_k: int = PAPER_K,
     if method == "rrf":
         return rrf_fuse(lists, k=rrf_k, weights=weights)
     if method == "rr":
-        order = sorted(lists, key=lambda name: name != "question")  # the question's list goes first
+        order = sorted(lists, key=lambda name: not is_question(name))  # the question's lists go first
         seen = {}
         for rank in range(CANDIDATES):
             for name in order:
@@ -105,3 +123,11 @@ for _m, _name in {"sum": "CombSUM", "mnz": "CombMNZ", "rr": "round-robin"}.items
 for _k in (1, 60):  # the user's own question counts 2x / 3x a rewrite
     for _w in (2, 3):
         FUSION[f"f3k{_k}w{_w}"] = (f"f2k, RRF k={_k}, question x{_w}", {**F2K, "rrf_k": _k, "weights": {"question": _w}})
+
+# Phase 4: f3k1 (keywords x4 + the question, RRF k=1), changing WHERE the rewrites search.
+F3K1 = {**F2K, "rrf_k": 1}
+FUSION["f4d"] = ("f3k1 on the note index (dense only)", {**F3K1, "collection": NOTE})
+FUSION["f4s1"] = ("f4d + BM25 and SPLADE with the question", {**F3K1, "collection": NOTE, "sparse": "question"})
+FUSION["f4s2"] = ("f4d + BM25 and SPLADE with the question and every rewrite",
+                  {**F3K1, "collection": NOTE, "sparse": "all"})
+FUSION["f4s2k20"] = ("f4s2 with RRF k=20 (Contextual #2's k)", {**F3K1, "collection": NOTE, "sparse": "all", "rrf_k": 20})
