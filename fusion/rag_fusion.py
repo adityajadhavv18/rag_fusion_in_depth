@@ -22,7 +22,10 @@ across retrievers (BM25 scores vs cosines) they would not be, which is why RRF u
 from collections import defaultdict
 
 import contextual  # noqa: F401
+import hyde
 from ingest import BM25, SPLADE, collection as index
+from ladder import RERANK_POOL, labelled
+from llm_rerank import llm_rerank
 from retrieve import PLAIN, Hit, _dense, dense_search, rrf_fuse, sparse_search, timed
 
 from rewrite import PASSAGES, rewrites
@@ -38,15 +41,19 @@ def is_question(name: str) -> bool:
 
 
 def fusion_lists(q: str, n: int = 4, keep_original: bool = False, collection: str = PLAIN, style: str = "original",
-                 temperature: float = 0.0, sample: int = 0, sparse: str = "") -> dict[str, list[Hit]]:
+                 temperature: float = 0.0, sample: int = 0, sparse: str = "", use_hyde: bool = False
+                 ) -> dict[str, list[Hit]]:
     """Dense lists: rw1..rwN (+ "question"). sparse adds BM25 and SPLADE lists (Phase 4):
-    "question" = searched with the question only (as in Contextual #2), "all" = with every rewrite too."""
+    "question" = searched with the question only (as in Contextual #2), "all" = with every rewrite too.
+    use_hyde adds Contextual #2's HyDE list: dense search with one fake Wikipedia passage (cached, Phase 5)."""
     queries = rewrites(q, n, style, temperature, sample)
     lists = _dense_lists(q, queries, keep_original, collection, style)
     if sparse:
         texts = {"question": q} | ({f"rw{i}": x for i, x in enumerate(queries, start=1)} if sparse == "all" else {})
         for using in (BM25, SPLADE):
             lists |= {f"{using}_{name}": sparse_search(t, CANDIDATES, using, collection) for name, t in texts.items()}
+    if use_hyde:
+        lists["hyde"] = dense_search(q, CANDIDATES, collection, vector=hyde.hyde_vector(q))
     return lists
 
 
@@ -91,13 +98,17 @@ FUSE_OPTS = ("method", "rrf_k", "weights")
 
 
 def split(opts: dict) -> tuple[dict, dict]:
-    """A rung's options -> (fusion_lists options, fuse options)."""
-    return ({k: v for k, v in opts.items() if k not in FUSE_OPTS}, {k: v for k, v in opts.items() if k in FUSE_OPTS})
+    """A rung's options -> (fusion_lists options, fuse options). "rerank" is neither: it acts after the vote."""
+    return ({k: v for k, v in opts.items() if k not in (*FUSE_OPTS, "rerank")},
+            {k: v for k, v in opts.items() if k in FUSE_OPTS})
 
 
-def fusion_search(q: str, k: int, **opts) -> list[Hit]:
+def fusion_search(q: str, k: int, rerank: bool = False, **opts) -> list[Hit]:
+    """rerank: gpt-4o-mini reads the fused top 20 under their match labels and orders them (Contextual #2's r4j
+    reranker, llm_rerank.py, unchanged); the vote only decides which 20 it sees."""
     list_opts, fuse_opts = split(opts)
-    return fuse(fusion_lists(q, **list_opts), **fuse_opts)[:k]
+    fused = fuse(fusion_lists(q, **list_opts), **fuse_opts)
+    return (llm_rerank(q, fused[:RERANK_POOL], labelled) if rerank else fused)[:k]
 
 
 # rung -> (label, fusion_lists options). Phase 2 keeps f1b's setup (rewrites + the question, dense, plain index,
@@ -131,3 +142,9 @@ FUSION["f4s1"] = ("f4d + BM25 and SPLADE with the question", {**F3K1, "collectio
 FUSION["f4s2"] = ("f4d + BM25 and SPLADE with the question and every rewrite",
                   {**F3K1, "collection": NOTE, "sparse": "all"})
 FUSION["f4s2k20"] = ("f4s2 with RRF k=20 (Contextual #2's k)", {**F3K1, "collection": NOTE, "sparse": "all", "rrf_k": 20})
+
+# Phase 5: the LLM reranker after the vote, and Contextual #2's HyDE list in the vote.
+F4S2 = {**F3K1, "collection": NOTE, "sparse": "all"}
+FUSION["f5a"] = ("f4s2 + LLM rerank of the top 20", {**F4S2, "rerank": True})
+FUSION["f5h"] = ("f4s2 + the HyDE dense list", {**F4S2, "use_hyde": True})
+FUSION["f5b"] = ("f5h + LLM rerank of the top 20", {**F4S2, "use_hyde": True, "rerank": True})
